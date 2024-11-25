@@ -1,0 +1,1147 @@
+This is a short explaination of how I decided to develop the Philosophers project of 42 Barcelona.
+The dining philosophers project is designed to understand how threads work and the basis of how to work with them.
+
+Threads are units of execution within a program that run independently, allowing tasks to be 
+performed concurrently (at the same time). This enables better use of CPU resources, parallel 
+execution, and can improve performance, especially in multi-core systems.
+
+Here you can find the documentation about the pthread.h header:
+https://pubs.opengroup.org/onlinepubs/7908799/xsh/pthread.h.html
+
+For this project we used:
+
+	-Create (pthread_create):
+
+		Used to create a new thread, allowing a function to run concurrently with the main program.
+		It takes parameters like the thread ID, attributes, the function to be executed, and its 
+		arguments.
+
+	-Join (pthread_join):
+
+		Waits for a specific thread to finish its execution. This ensures that the main thread or 
+		other threads can wait for a thread to complete before continuing.
+    
+    *The concurrency of threads can create two situations that we need to understand before explaining
+    the next set of function used for the program, Race Conditions & Deadlocks:
+
+    	*Race conditions:
+    		Happen when two or more threads access shared data at the same time, and the outcome 
+    		depends on the order of execution. This can lead to unpredictable and erroneous results, 
+    		as the threads are "racing" to use the data without proper synchronization.
+
+            A clear example of this in the project is when two philosopher threads try to acces de 
+            shared variable "simulation_start_time", that returns a timestap.
+
+	    *Deadlocks:
+	    	Occur when two or more threads are waiting for each other to release resources, causing all
+	    	of them to be stuck indefinitely. This happens when threads hold some resources while 
+	    	trying to acquire others already locked by another thread, creating a cycle of dependency.
+
+            A short example of this in the project is fork access. If all the philosophers have the same
+            strategy to access shared resourse (lets remember that there ara as many forks as philosophers
+            and each philosopher needs two forks to eat), for example: "grab the fork with your same ID",
+            all philosophers would lock their fork and would be locked because they can't access another fork.
+
+	-Init (pthread_mutex_init):
+
+		Initializes a mutex to be used for protecting shared resources. It sets up the mutex to be 
+		used in lock and unlock operations.
+
+	-Lock (pthread_mutex_lock):
+
+		Acquires the mutex lock, preventing other threads from accessing the shared resource until 
+		it is unlocked. This ensures thread safety when multiple threads need to access shared data.
+
+	-Unlock (pthread_mutex_unlock):
+
+		Releases the mutex lock, allowing other threads to access the shared resource. It signals 
+		that the critical section is now free for use by other threads.
+
+	-Destroy (pthread_mutex_destroy):
+
+		Used to free resources allocated for a mutex (mutual exclusion lock). It's called after the 
+		mutex is no longer needed to prevent memory leaks.
+
+After this short theory explaination, lets dig in to the project.
+
+First, I'd like to share the header:
+--------------------------------------------------------
+PHILO.H:
+
+#ifndef PHILO_H
+# define PHILO_H
+# include <stdlib.h>    --> For malloc and EXIT_FAILURE/EXIT_SUCCESS
+# include <stdio.h>     --> For printf
+# include <stdbool.h>   --> For bool data type
+# include <limits.h>    --> For INT_MAX
+# include <pthread.h>   --> For threads (all functions mentioned)
+# include <sys/time.h>  --> For gettimeofday function
+# include <unistd.h>    --> For usleep 
+//Macros
+# define ARGS_ERROR "\nIncorrect arguments.\n"  --> macro to print argument error
+
+//Shortener
+typedef pthread_mutex_t	t_mtx; --> Because the function name is so long
+
+//Predefs
+typedef struct s_philo	t_philo;    --> To be able to create a struct type inside another
+typedef struct s_table	t_table;    --> if one type of data doesn't exists before using it
+typedef struct s_fork	t_fork;     --> on another type of date it causes an error
+
+//Structs
+struct	s_fork  --> Fork structure
+{
+	t_mtx	fork;   --> mutex for each fork (lock it, grab it & unlock it)
+	int		id;     --> fork id for debuging (usefull to check fork assignation & use)
+};
+
+struct	s_philo --> Philosopher structure
+{
+	int			id;             --> philosopher id for print & debug
+	long		meals;          --> variable to control each philosopher number of meals
+	long		lm_t;           --> last meal timestamp for each philosoper
+	bool		full;           --> boolean to know when a philosopher has eat enought
+	bool		dead;           --> boolean to know if a philosopher died
+	pthread_t	th_id;          --> thread id to create each thread
+	t_mtx		philo_mtx;      --> mutex for each philosopher (for monitoring)
+	t_fork		*first_fork;    --> pointer to the first fork to grab
+	t_fork		*second_fork;   --> pointer to the second fork to grab
+	t_table		*table;         --> pointer to the dinner table
+};
+
+struct	s_table --> Dinner table structure
+{
+	long	philo_nbr;  --> number of philosophers in the table/simulation
+	long	tto_die;    --> max time between meal & meal for each philosopher
+	long	tto_eat;    --> time a philosopher spends eating
+	long	tto_sleep;  --> time a philosopher spends sleeping (after eating)
+	long	min_meals;  --> meals for a philosopher to be full
+	long	sim_start;  --> timestamp of simulation start
+	bool	philo_dead; --> to monitor if a philosopher died
+	t_mtx	table_mtx;  --> mutex to acces table shared data
+	t_mtx	print_mtx;  --> mutex to lock acces to print
+	t_fork	*forks;     --> pointer to all forks
+	t_philo	*philos;    --> pointer to all philosophers
+};
+
+//Utils
+void	error_exit(const char *error);  --> standard error & exit function
+void	precise_usleep(long ms);        --> more precise usleep (we work in milliseconds)
+bool	is_dead(t_philo *philo);        --> common function to cheack if a philo is dead
+bool	is_digit(const char *str);      --> utility function for argument check functions
+
+//getters & setters
+bool	get_bool(t_mtx *mutex, bool *value);            --> to lock, get a bool & unlock 
+void	set_bool(t_mtx *mutex, bool *dest, bool value); --> to lock, set a bool & unlock
+long	gettime(void);                                  --> to get timestamp in milliseconds
+bool	get_long(t_mtx *mutex, long *value);            --> to lock, get a long & unlock 
+void	set_long(t_mtx *mutex, long *dest, long value); --> to lock, set a long & unlock
+
+//Check inputs
+bool	correct_input(int argc, char **argv);   --> to check if arguments recieved are ok
+long	ft_atol(const char *str);               --> to convert inputs recieved to long integers
+
+//Init data
+void	init_data(t_table *table, char **argv); --> to initialize all data needed before simulation
+
+//Simulation
+void	start_simulation(t_table *table);       --> to start dinner simulation
+
+//Print status
+void	print_status(t_philo *philo, const char *status);   --> to lock, print an status & unlock
+void	print_dead(t_philo *philo, const char *status);     --> to lock, print dead status & unlock
+
+//Actions
+void	take_forks(t_philo *philo); --> function to take both forks
+void	eat(t_philo *philo);        --> function to eat
+void	to_sleep(t_philo *philo);   --> function to sleep
+void	think(t_philo *philo);      --> function to think
+
+//Monitor
+void	*monitor(void *data);       --> function for monitor thread
+
+//Clean
+void	cleanup_table(t_table *table);  --> function to clean all data (destroy mutex & free)
+#endif
+
+--------------------------------------------------------
+
+Now that we have a basic idea of the data we'll use for the project, let's start from the very begginig,
+the main function, that needs to be clean & understandable:
+
+--------------------------------------------------------
+MAIN.C:
+
+int	main(int argc, char **argv)
+{
+	t_table	table;
+
+	if (!correct_input(argc, argv))
+		error_exit(ARGS_ERROR);
+	else
+	{
+		init_data(&table, argv);
+		start_simulation(&table);
+		cleanup_table(&table);
+		exit(EXIT_SUCCESS);
+	}
+}
+
+--------------------------------------------------------
+We could divide the main function in 4 phases:
+
+1 - Check if arguments recieved for program execution are correct, if not exit program.
+2 - Init all data needed for the program
+3 - Start the simulation / dinner
+4 - Cleanup all data used for the program
+
+Since the functions in the main program should be simple & easy to understand, a t_table
+data called table is declared at the very beggining to pass it to all the functions.
+
+Let's start with phase 1
+
+1 - CHECK ARGUMENTS (check.c & utils.c)
+--------------------------------------------------------
+CORRECT_INPUT:
+
+bool	correct_input(int argc, char **argv)
+{
+	if (argc < 5 || argc > 6)
+		return (0);
+	if (!valid_inputs(argv))
+		return (0);
+	return (1);
+}
+--------------------------------------------------------
+This function controls 1srt the number of arguments, since we need to accept:
+
+    ./philo 4 410 200 200 5
+    argc(1)(2)(3) (4) (5) (6)
+
+    2 - Number of philosophers
+    3 - Time to die
+    4 - Time to eat
+    5 - Time to sleep
+    6 - Optional arg of meals for a philo to be full    
+
+Then it checks if all arguments are valid with valid_input() function.
+If so, returns ture/false --> correct input/non correct input.
+
+--------------------------------------------------------
+VALID_INPUTS:
+
+static bool	valid_inputs(char **argv)
+{
+	int	i;
+
+	i = 1;
+	while (argv[i])
+	{
+		if (i == 5)
+		{
+			if (is_unsigned_int(argv[i]) == 0)
+				return (0);
+			else if (is_unsigned_int(argv[i]) == 1)
+			{
+				argv[i] = 0;
+				return (1);
+			}
+			else
+				return (1);
+		}
+		else if (!is_positive_int(argv[i]))
+			return (0);
+		i++;
+	}
+	return (1);
+}
+--------------------------------------------------------
+This function iterates through all arguments recieved.
+Since we have an "special case" wich is the optional max_meals argument, we want to
+manage it at the very beggining of the function.
+
+If we're handeling this arg (argv[i] --> i = 5), we created an adhoc function to 
+manage 3 cases:
+
+    1 --> This argument is a negative int (-5) or is bigger than an int (2147483648)
+            --> The program ENDS.
+    2 --> This argument is 0
+            --> The program STARTS & ENDS (passes because is valid, but ends because all philos 
+            have eaten 0 times).
+    3 --> This argument is a positive integer
+            --> Program continues ( PASS --> "2fa", "+3", PASSES AS no arg 5 recieved --> "-2", "fa3")
+
+All other arguments will be checked if are positive integers ( > than 0 && < INT_MAX);
+
+To acomplish that, we have is_positive_int() & is_unsigned_int() functions:
+--------------------------------------------------------
+IS_UNSIGNED_INT:
+
+static int	is_unsigned_int(char *argv)
+{
+	long	num;
+
+	if (!is_digit(argv))
+		return (1);
+	num = ft_atol(argv);
+	if (num < 0 || num > INT_MAX)
+		return (0);
+	return (2);
+}
+
+*Three posible int returns:
+    --> 0 (is not digit, passes as no arg)
+    --> 1 (is 0 passes for START-END)
+    --> 2 (is positive int != 0)
+--------------------------------------------------------
+IS_POSITIVE_INT:
+
+static bool	is_positive_int(char *argv)
+{
+	long	num;
+
+	num = ft_atol(argv);
+	if (num <= 0 || num > INT_MAX)
+		return (0);
+	return (1);
+}
+
+*If its an int >= 0 passes (¿0 is positive? its not negative xD)
+--------------------------------------------------------
+
+To understand the logic in this two functions we need to check the ft_atol() function,
+that recieves a string and convert it to a long int:
+--------------------------------------------------------
+FT_ATOL:
+
+long	ft_atol(const char *str)
+{
+	int		i;
+	long	num;
+	int		sign;
+
+	i = 0;
+	num = 0;
+	sign = 1;
+	while (str[i])
+	{
+		while ((str[i] >= 9 && str[i] <= 13) || str[i] == ' ')
+			i++;
+		if (str[i] == '+' || str[i] == '-')
+		{
+			if (str[i] == '-')
+				sign = -1;
+			i++;
+		}
+		if (!(str[i] >= '0' && str[i] <= '9'))
+			return (0);
+		while (str[i] >= '0' && str[i] <= '9')
+			num = (num * 10) + (str[i++] - '0');
+		if (str[i] != '\0')
+			break ;
+	}
+	return (num * sign);
+}
+
+*Accepts spaces & tabs at the beggining, 1 positive/negative symbol, and returns the digit
+part of the string as a long int (if str = '  +a' it braks and returns 0)
+
+--------------------------------------------------------
+
+If input is not correct, the error_exit() function is used to print an error and exit the
+program with EXIT_FAILURE.
+
+Lets remember the part of the code in main function:
+--------------------------------------------------------
+if (!correct_input(argc, argv))
+	error_exit(ARGS_ERROR);
+--------------------------------------------------------
+And now let's quickly review the function.
+
+ERROR_EXIT (utils.c)
+--------------------------------------------------------
+void	error_exit(const char *error)
+{
+	printf("%s\n", error);
+	exit(EXIT_FAILURE);
+}
+--------------------------------------------------------
+This function recieves a string, prints it & exits. In this case it recieves the incorrect
+arguments string.
+
+Here the argument check part is completed and we can proceed to the phase 2, initializing data.
+
+2 - INIT DATA (init_data.c)
+--------------------------------------------------------
+INIT_DATA:
+
+void	init_data(t_table *table, char **argv)
+{
+	int	i;
+
+	i = 0;
+	table->philo_nbr = ft_atol(argv[1]);
+	table->tto_die = ft_atol(argv[2]);
+	table->tto_eat = ft_atol(argv[3]);
+	table->tto_sleep = ft_atol(argv[4]);
+	if (argv[5])
+		table->min_meals = ft_atol(argv[5]);
+	else
+		table->min_meals = -1;
+	table->philo_dead = false;
+	table->philos = malloc(sizeof(t_philo) * table->philo_nbr);
+	table->forks = malloc(sizeof(t_fork) * table->philo_nbr);
+	while (i < table->philo_nbr)
+	{
+		pthread_mutex_init(&table->forks[i].fork, NULL);
+		table->forks[i].id = i;
+		i++;
+	}
+	pthread_mutex_init(&table->table_mtx, NULL);
+	pthread_mutex_init(&table->print_mtx, NULL);
+	init_philo(table);
+}
+--------------------------------------------------------
+This function recieves a pointer to the table & all args (checked).
+It inits all data needed for the simulation:
+- Number of philosophers (philo_nbr) --> 1st arg
+- Time to die (tto_die) --> 2nd arg
+- Time to eat (tto_eat) --> 3rd arg
+- Time to sleep (tto_sleep) --> 4rth arg
+- Meals to be full (min_meals) --> 5th arg (-1 if not 5th arg)
+- There is a philosopher dead? --> starts as false
+- Allocates memory for philo_nbr philosophers (t_philo) at philos pointer in table
+- Allocates memory for philo_nbr forks (t_fork) at forks pointer in table
+- Iterates through forks to initialize each mutex (fork) & set fork id
+- Initialize a mutex for printing & a mutex for the table
+- Calls to init_philo() function
+
+The init_philo() function is to initialize all philosopher data:
+--------------------------------------------------------
+INIT_PHILO:
+
+static void	init_philo(t_table *table)
+{
+	int		i;
+	t_philo	*philo;
+
+	i = 0;
+	while (i < table->philo_nbr)
+	{
+		philo = &table->philos[i];
+		philo->id = i + 1;
+		philo->meals = 0;
+		philo->full = false;
+		philo->dead = false;
+		philo->table = table;
+		pthread_mutex_init(&philo->philo_mtx, NULL);
+		init_forks(philo, table->forks);
+		i++;
+	}
+}
+--------------------------------------------------------
+This function iterates through table to initialize each philosopher.
+
+For this purpose, it creates a pointer to a t_philo data called philo,
+and in each iteartion it sets this pointer as the pointer philos in
+table position i.
+Then uses this pointer to initialize all data:
+- The philo id (it starts as 1 not at 0 this is why i + 1)
+- Initial meals/philo to 0
+- Philo is not full (false)
+- Philo is not death (false)
+- Pointer to table (to easy move from philo to table)
+- Initialize a mutex for each philo (to access data in it racing with monitor)
+- Calls to init_forks function.
+
+This init_forks function is the one responsible to asign a 1rst & 2nd fork to
+each philosopher in a way that prevents deadlock:
+--------------------------------------------------------
+INIT_FORKS:
+
+static void	init_forks(t_philo *philo, t_fork *forks)
+{
+	int	philo_nbr;
+
+	philo_nbr = philo->table->philo_nbr;
+	philo->second_fork = &forks[philo->id - 1];
+	philo->first_fork = &forks[(philo->id) % philo_nbr];
+	if ((philo->id % 2) == 0)
+	{
+		philo->first_fork = &forks[philo->id - 1];
+		philo->second_fork = &forks[(philo->id) % philo_nbr];
+	}
+}
+--------------------------------------------------------
+To acomplish his mision, this function sets the forks in a different way
+depending on the position of each philosophers in the table.
+
+If the philo is in an even position (philo id % 2 == 0 // fex: philo 2)
+--> His first fork to grab will be the one in his position (id -1)
+--> His second fork will be the next one (id % philo nbr)
+Else (philo in odd position // fex: philo 1)
+--> Oposite
+*This way, each pair of consecutive philosophers will be assigned a first
+fork (the one on his position for odd philos & the previous one for
+the even philos) & then a second fork (the one on previous position for
+for odd philos & the one on his position for even philos).
+--------------------------------------------------------
+
+With this, the initialization phase of the program is complete and we enter
+in the start simulation phase of the program.
+
+3 - START SIMULATION (all other files except utils.c where clenap function is)
+--------------------------------------------------------
+
+Since this is the main part of the program, I'll do my best to try to explain it
+as simply as posible to be understood.
+It will be the longer phase since for this one, every other file (functions)
+except the one to clean at the end are needed.
+
+Let's start from the very beggining:
+--------------------------------------------------------
+START_SIMULATION:
+
+void	start_simulation(t_table *table)
+{
+	pthread_t	monitor_th;
+	int			i;
+
+	if (table->min_meals == 0)
+		return ;
+	else if (table->philo_nbr == 1)
+	{
+		pthread_create(&table->philos[0].th_id, NULL,
+			lone_simulation, &table->philos[0]);
+		usleep(40000);
+		pthread_join(table->philos[0].th_id, NULL);
+	}
+	else
+	{
+		i = -1;
+		while (++i < table->philo_nbr)
+			pthread_create(&table->philos[i].th_id, NULL,
+				simulation, &table->philos[i]);
+	}
+	pthread_create(&monitor_th, NULL, monitor, table);
+	i = -1;
+	while (++i < table->philo_nbr)
+		pthread_join(table->philos[i].th_id, NULL);
+	pthread_join(monitor_th, NULL);
+}
+--------------------------------------------------------
+This function will manage the case in which mels to be full is equal to 0
+(meaning that the program will end since it is stated at the subject:
+"if all the philosophers eat at least 'number_of_times_each_philosopher_
+must_eat' the simulation will stop") covered here:
+--------------------------------------------------------
+	if (table->min_meals == 0)
+		return ;
+--------------------------------------------------------
+Also manage the one philosopher case (special case since he won't be 
+able to eat with one fork).
+
+And also all other cases.
+
+Since the subject states "Philosophers don't speak with each other", we
+can imply by this that no philosopher can check if any other philosopher
+died during simulation.
+For this purpose I asume there are lots of ways to acopmlish it, but my
+solution is to create an extra thread (monitor thread) that will be
+constantly checking for dead philosophers to end simulation.
+--------------------------------------------------------
+
+This is why we start by creating a pthread_t data type called monitor_th
+and an int i to iterate through all philos_nbr in the table.
+
+Since the one philosopher case will be easier to understand once we know
+all the logic of working with multiple philosophers, we'll leace this case
+for the end eventhogh is the first case managed ("special case").
+
+MULTIPLE PHILOSOPHERS:
+
+To work with multiple philos, we iterate through table philo_nbr variable
+and create a thread for each one passing to the pthread_create function:
+- Thread id (each philo structure has a pthread_t th_id for this purpose)
+- The function that the thread will execute (simulation in this case)
+- The philo data (accessible through table philos[i] pointer)
+
+After creating each philo thread, we create the monitor thread passing:
+- Monitor thread (created earlier as monitor_th)
+- Function to execute (monitor in this case)
+- The table data (since this thread needs to manage all data on the table)
+
+**JOIN PHASE OF THE SIMULATION**
+
+This part is common for both multiple & single philosophers cases, since it
+first iterates through table philo_nbr joining all threads created (1 or
+multiple depending on the case) & then joins the monitor thread.
+
+Once this initial part is set, we'll now center our atention on the functions
+that each thread executes once created (simulation in multiple philos case
+& lone_simulation in single philo case).
+
+SIMULATION:
+--------------------------------------------------------
+static void	*simulation(void *data)
+{
+	t_philo	*philo;
+
+	philo = (t_philo *)data;
+	pthread_mutex_lock(&philo->table->table_mtx);
+	philo->table->sim_start = gettime();
+	philo->lm_t = gettime();
+	pthread_mutex_unlock(&philo->table->table_mtx);
+	while (1)
+	{
+		if (get_bool(&philo->table->table_mtx, &philo->table->philo_dead))
+			break ;
+		if (!get_bool(&philo->philo_mtx, &philo->full))
+			actions(philo);
+		else
+			break ;
+	}
+	return (NULL);
+}
+--------------------------------------------------------
+Since the pthread_create function has this prototype:
+
+--------------------------------------------------------
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+    void *(*start_routine)(void*), void *arg)
+--------------------------------------------------------
+The function passed as 3rd parameter needs to be:
+
+    void *(*start_routine)(void*)
+
+In this case "void	*simulation(void *data)"
+
+We need to "recover" the data by creating a t_philo pointer called philo
+and convert it to t_philo again:
+--------------------------------------------------------
+	t_philo	*philo;
+
+	philo = (t_philo *)data;
+--------------------------------------------------------
+Once we,ve done this, we'll lock the table (shared resourse) to set the
+simulation start timestamp and the last meal timestamp for each philo/thread.
+Once set, we can unlock the resourse.
+
+To set the timestamp we use an adhoc function gettime() (get_set.c)
+--------------------------------------------------------
+GETTIME:
+
+long	gettime(void)
+{
+	long			time;
+	struct timeval	tv;
+
+	gettimeofday(&tv, NULL);
+	time = tv.tv_sec * 1e3 + (tv.tv_usec / 1e3);
+	return (time);
+}
+--------------------------------------------------------
+This function uses the allowed function gettimeofday() that uses a timeval
+structure:
+--------------------------------------------------------
+struct timeval
+{
+    time_t      tv_sec;     /* seconds */
+    suseconds_t tv_usec;    /* microseconds */
+};
+--------------------------------------------------------
+Since we're working with milliseconds, we need to convert both seconds &
+microseconds to milliseconds, add them and return:
+--------------------------------------------------------
+time = tv.tv_sec * 1e3 + (tv.tv_usec / 1e3);
+--------------------------------------------------------
+Here we add the seconds part (multiplied by 1000 to pass seconds to milliseconds)
+to the microseconds part (divided by 1000 to pass microseconds to milliseconds)
+--------------------------------------------------------
+
+Let's stop for a second to understand why we did that.
+1 - Simulation start timestamp:
+	We need to print a timestamp before every status change for each philosopher
+		(example: "1740   1 has taken a fork")
+2 - Last meal timestamp:
+	We need to constantly check if a philosopher dies, and one philosopher dies if
+	spend more time than time_to_die in other statuses (sleep, think), so this
+	timestamp starts beeing equal to similation start time but is updated each time
+	that a philosopher eats.
+
+Now let's see the main while loop inside the simulation:
+--------------------------------------------------------
+while (1)
+{
+	if (get_bool(&philo->table->table_mtx, &philo->table->philo_dead))
+		break ;
+	if (!get_bool(&philo->philo_mtx, &philo->full))
+		actions(philo);
+	else
+		break ;
+}
+--------------------------------------------------------
+This part will be using the get_bool() function & the actions() function.
+
+If you noticed, almost all numeric date (all that can be considered critical because
+of its condition as possible shared data between threads) on our structures uses type
+long.
+
+This is because we want to protect the data before reading/modifing. For this purpose
+get/set functions are created that we'll see on next steps.
+
+But first let's understand the code.
+While (1) means that this loop will be constantly running (until break).
+The first check on the loop is if there is a dead philosopher in the table/simulation.
+If so, the loop ends.
+then it checks if the philo (thread) is full (has eat meals_to_eat), if he hasn't, it
+calls the action() function (that executes each action consecutively).
+Finally if after checking if no philo died & if philo is not full, if else it breaks,
+this is for the case time to die is enough big for all philos to eat & sleep without
+dying and all philos reach the full status (they eat meals_to_eat).
+
+Now that the main loop is explained, lets check the get & set functions (get_set.c)
+--------------------------------------------------------
+GET_BOOL & SET_BOOL:
+
+bool	get_bool(t_mtx *mutex, bool *value)
+{
+	bool	ret;
+
+	pthread_mutex_lock(mutex);
+	ret = *value;
+	pthread_mutex_unlock(mutex);
+	return (ret);
+}
+
+void	set_bool(t_mtx *mutex, bool *dest, bool value)
+{
+	pthread_mutex_lock(mutex);
+	*dest = value;
+	pthread_mutex_unlock(mutex);
+}
+--------------------------------------------------------
+As mentioned before, this adhoc functions are to lock, get/set a variable & unclock it.
+For this purpose both prototype recieve a t_mtx *mutex (pointer to mutex), since the
+pthread_mutex_lock & pthread_mutex_unlock function prototypes recieve that:
+--------------------------------------------------------
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+--------------------------------------------------------
+The only difference between both functions is that get_bool() needs to recover a value,
+this is why the function recieves a pointer and dereference to obtain the value.
+For this purpose, it locks, sets the return value to the value recieved (readed), unlocks,
+and then returns the value.
+
+In this case, we're locking the table, reading the value of philo_dead (can be true/false),
+returning it, and in case it returns as true, we break the infinite loop.
+
+In the set_bool() case, it needs a pointer to the destination and a value to set, this
+way, it locks the resourse, sets the value on the pointer as the value recieved & then
+unlocks the resourse (we'll see an example of use in next steps).
+--------------------------------------------------------
+
+Once the logic of the main loop is understood, let's understand the actions() function:
+--------------------------------------------------------
+ACTIONS:
+
+static void	*actions(t_philo *philo)
+{
+	if (!is_dead(philo))
+		take_forks(philo);
+	if (!is_dead(philo))
+		eat(philo);
+	if (!is_dead(philo))
+		to_sleep(philo);
+	if (!is_dead(philo))
+		think(philo);
+	if (is_dead(philo))
+	{
+		pthread_mutex_lock(&philo->table->table_mtx);
+		if (!philo->table->philo_dead)
+		{
+			pthread_mutex_unlock(&philo->first_fork->fork);
+			pthread_mutex_unlock(&philo->second_fork->fork);
+			philo->table->philo_dead = true;
+			print_dead(philo, "died");
+		}
+		pthread_mutex_unlock(&philo->table->table_mtx);
+		return (NULL);
+	}
+	else
+		return (NULL);
+}
+--------------------------------------------------------
+This function is to manage all the actions that a philosopher needs to perform in
+the order stablished on the subject (eat, sleep, think).
+
+*IMPORTANT* 
+Since we're checking if the philo is dead before each action, and we lock the forks
+in take_forks & unlock them on eat, it's important to unlock the forks in case of
+philo death. If one philo has enough time to take 1 or 2 forks but dies, the forks
+will be locked & it's necessary to unlock them.
+
+Before taking any action, we constantly check if the philosopher is dead (if he is 
+dead it can't take any further action).
+
+IS_DEAD (utils.c)
+--------------------------------------------------------
+IS_DEAD:
+
+bool	is_dead(t_philo *philo)
+{
+	long	elapsed;
+	long	now;
+	long	last_meal;
+
+	last_meal = philo->lm_t;
+	now = gettime();
+	elapsed = now - last_meal;
+	if (elapsed > philo->table->tto_die)
+	{
+		set_bool(&philo->philo_mtx, &philo->dead, true);
+		return (1);
+	}
+	return (0);
+}
+--------------------------------------------------------
+This function is to calculate if a philosopher has overpassed the time he has to die if
+he doesn't eat.
+To do so, it substract the last meal timestamp (that will be reset each time a philo eats)
+to the actual time, if the result is larger than time to die, it sets the dead property
+in the philo to true & returns true (yes, a philo is dead), else, it returns 0 (no, philo
+is not dead).
+
+As you can see in the code shown before, there is actually an "extra" action, which is
+take forks, so we'll check action by action:
+
+	1 - Take forks
+	2 - Eat
+	3 - Sleep
+	4 - Think 
+	5 - "Die" (not an action but a case)
+
+1 - TAKE FORKS (actions.c)
+--------------------------------------------------------
+TAKE_FORKS:
+
+void	take_forks(t_philo *philo)
+{
+	pthread_mutex_lock(&philo->first_fork->fork);
+	print_status(philo, "has taken a fork");
+	pthread_mutex_lock(&philo->second_fork->fork);
+	print_status(philo, "has taken a fork");
+}
+--------------------------------------------------------
+Since we already asigned different 1st & 2nd fork depending on the position (odd/even)
+of the philosopher, wen they enter in the take_forks() function concurrently, we'll
+takle deadlock because each pair of consecutive philosophers will compete to access first
+for the same resouse & then for another one, creating a situation of worst case scenario
+of one philosopher eating.
+
+This function locks the first fork, prints status, locks the second fork, prints status.
+
+We'll check the print_status() function once all actions explained.
+IMPORTANT to NOTICE that we just LOCKED & not unlocked the forks, because we need them
+until we perform the next action (eat).
+
+2 - EAT (actions.c)
+--------------------------------------------------------
+EAT:
+
+void	eat(t_philo *philo)
+{
+	philo->meals++;
+	if (philo->meals == philo->table->min_meals)
+		philo->full, true;
+	philo->lm_t, gettime();
+	print_status(philo, "is eating");
+	precise_usleep(philo->table->tto_eat);
+	pthread_mutex_unlock(&philo->first_fork->fork);
+	pthread_mutex_unlock(&philo->second_fork->fork);
+}
+--------------------------------------------------------
+In this function, we increment the meals counter in each philosopher (it doesn't need
+to be locked & unlocked because monitor thread don't access to this variable so there
+is no race condition).
+
+If the philosopher has eaten the number of meals stablished to be full, the full variable
+is set to true, and its last meal time timestamp is reset.
+
+The eat status is printed.
+
+The thread is "putted into sleep" (stoped) for "time_to_sleep" with the precise_usleep() 
+function, that will be explained once all actions are explained (print & precise_usleep pending).
+
+THEN & just THEN, BOTH FORKS are UNLOCKED (for other philos/
+threads to access them).
+
+3 - SLEEP (actions.c)
+--------------------------------------------------------
+SLEEP:
+
+void	to_sleep(t_philo *philo)
+{
+	print_status(philo, "is sleeping");
+	precise_usleep(philo->table->tto_sleep);
+}
+--------------------------------------------------------
+This function just prints the sleep status & sleeps the thread for time_to_sleep.
+
+4 - THINK (actions.c)
+--------------------------------------------------------
+THINK:
+
+void	think(t_philo *philo)
+{
+	print_status(philo, "is thinking");
+	precise_usleep(5);
+}
+--------------------------------------------------------
+This function prints the think status.
+It also uses the precise_usleep() function to force the thread to think at least
+for 5 milliseconds.
+
+**THIS IS IMPORTANT**
+The system is prety FAIR when executed with EVEN number of philosophers but not
+when executed with ODD number of philosophers.
+This is due to the number of forks needed to eat, when even philos, once one pair
+of philos unlock their forks, another pair is allowed to acces those resourses.
+But in even number of philos, there is the posibility that a thread that just finished
+sleeping compeet with another that has been thinking for a long time. So in this case
+if the thread that just EAT-SLEEP wins the competition to access the fork, it makes A
+EAT-SLEEP-EAT cycle without thinking, and the thread that loses, makes two think cycles
+(THINK-THINK) or it is not even able to eat for the first time causing it to die when
+there is no need for him to die.
+By introducing this 5 milliseconds forced think time, the system is fair again because
+it gives enough time for the philosopher that hasn't been eating to grab the forks & eat.
+
+5 - DIE (not an action but a case needed to be printed and managed)
+--------------------------------------------------------
+	if (is_dead(philo))
+	{
+		pthread_mutex_lock(&philo->table->table_mtx);
+		if (!philo->table->philo_dead)
+		{
+			philo->table->philo_dead = true;
+			print_dead(philo, "died");
+		}
+		pthread_mutex_unlock(&philo->table->table_mtx);
+		return (NULL);
+	}
+--------------------------------------------------------
+In case the philo/thread didn't got inside of any of the actions functions is because he
+died.
+In this case, we lock the table, and if no philo died (IMPORTANT BECAUSE WE DON'T WANT To
+PRINT 2 DEATHS, just 1), the philo_dead variable is set to true & the died status is printed
+with the print_death() function (is almost the same as print_status).
+After that, table is unlocked and exit the loop.
+
+Now that we covered all actions is time to check the pending functions used in them.
+
+PRINT_STATUS (print.c)
+--------------------------------------------------------
+PRINT_STATUS:
+
+void	print_status(t_philo *philo, const char *status)
+{
+	long	elapsed;
+
+	if (get_bool(&philo->table->table_mtx, &philo->table->philo_dead))
+		return ;
+	elapsed = gettime() - philo->table->sim_start;
+	pthread_mutex_lock(&philo->table->print_mtx);
+	printf("%-6ld %d %s\n", elapsed, philo->id, status);
+	pthread_mutex_unlock(&philo->table->print_mtx);
+}
+--------------------------------------------------------
+This function first checks if there is a dead philosopher in the table, if so, nothing
+is printed (we don't want to print status after a philosopher died in the table).
+
+Then it calculates the elapsed time (for the print timestamp mentioned before) by
+geting the actual time (gettime() function) and substacting the simulation start timestamp.
+Then we lock the print, print the status with the timestamp and philo id info & unlocks print.
+
+PRINT_DEATH (print.c)
+--------------------------------------------------------
+PRINT_DEATH:
+
+void	print_dead(t_philo *philo, const char *status)
+{
+	long	elapsed;
+
+	elapsed = gettime() - philo->table->sim_start;
+	pthread_mutex_lock(&philo->table->print_mtx);
+	printf("%-6ld %d %s\n", elapsed, philo->id, status);
+	pthread_mutex_unlock(&philo->table->print_mtx);
+}
+--------------------------------------------------------
+This function is exactly the same as print_status but without the first check to return
+if a philo already died (because we want to print it even when a philo died).
+Reviewing the code, a bool flag could be introduced to use print_status & avoid the need
+to duplicate the function with just one lees check.
+
+The only pending function for now is precise_usleep() function, that needs a short explainations
+on why we need that to be implemented if we can use the usleep() function already build.
+
+PRECISE_USLEEP (utils.c)
+--------------------------------------------------------
+PRECISE_USLEEP:
+
+void	precise_usleep(long ms)
+{
+	long	start;
+
+	start = gettime();
+	while (gettime() - start < ms)
+		usleep(100);
+}
+--------------------------------------------------------
+This function is necessary because usleep() function can be imprecise for longer sleep durations
+due to system scheduling & context switching. These delays can result in threads walking up later
+than expected, wich disrupts the timing in applications requiring precise millisecond-level accuracy.
+
+This function loops calling usleep for 100 milliseconds (not to overcharge the CPU) while the elapsed
+time is less than the time required to sleep recived by the function.
+The balance between precision & CPU use is important, since the evaluation sheet of the project
+dictates that the evaluator should not try times_to < than 60ms, you could try using usleep(60),
+but I find out that usleep(100) works for me.
+
+Before explaining the lone_simulation case (Still pending) let's check first the monitoring part.
+
+MONITOR (monitor.c)
+--------------------------------------------------------
+MONITOR:
+
+void	*monitor(void *data)
+{
+	t_table	*table;
+
+	table = (t_table *)data;
+	while (1)
+	{
+		usleep(10);
+		if (get_bool(&table->table_mtx, &table->philo_dead))
+			break ;
+		if (table->philo_nbr == 1)
+		{
+			print_dead(&table->philos[0], "died");
+			break ;
+		}
+		if (&full_philos)
+			break ;
+	}
+	return (NULL);
+}
+--------------------------------------------------------
+This function enters in an infinite loop, that sleeps during 10 milliseconds (this part is important
+because in the evaluation sheet states that the margin to print a death is of 10 milliseconds), and
+checks for 3 scenarios:
+
+	1 - There is a dead philosopher
+	2 - The number of philosophers is 1
+	3 - Philosophers are full
+
+In the 1rst case it just breaks the loop & a thread will be in charge of printing the death status
+of the dead philosopher.
+
+If the number of philosophers is 1, monitor thread is the one in charge of printing the death.
+
+To check if all philosophers are full it calls full_philos() function.
+
+FULL_PHILLOS (monitor.c)
+--------------------------------------------------------
+FULL_PHILLOS:
+
+static bool	full_philos(t_table *table)
+{
+	int	full_philos;
+	int	i;
+
+	full_philos = 0;
+	i = 0;
+	while (i < table->philo_nbr)
+	{
+		if (get_bool(&table->philos[i].philo_mtx, &table->philos[i].full))
+			full_philos++;
+		i++;
+	}
+	if (full_philos == table->philo_nbr)
+	{
+		set_bool(&table->table_mtx, &table->philo_dead, true);
+		return (1);
+	}
+	return (0);
+}
+--------------------------------------------------------
+This function checks if all philosophers are full & updates the full_philos flag.
+If all philos are full, it sets the philo_dead variable in the table to true to end
+the simulation.
+
+Now that we almost finished reviewing the simulation phase and just clean phase is
+pending, lets first check the "special case" of just one philosopher.
+
+I asume there are lots of ways to solve this case but this is the one that I found out.
+
+LONE_SIMULATION (simulation.c)
+--------------------------------------------------------
+LONE_SIMULATION:
+
+static void	*lone_simulation(void *data)
+{
+	t_philo	*philo;
+
+	philo = (t_philo *)data;
+	pthread_mutex_lock(&philo->table->table_mtx);
+	philo->table->sim_start = gettime();
+	philo->lm_t = gettime();
+	pthread_mutex_unlock(&philo->table->table_mtx);
+	print_status(philo, "has taken a fork");
+	if (!get_bool(&philo->philo_mtx, &philo->dead))
+		precise_usleep(philo->table->tto_die);
+	set_bool(&philo->philo_mtx, &philo->dead, true);
+	return (NULL);
+}
+--------------------------------------------------------
+this function, locks the table, sets the start time timestamp, the last meal timestamp &
+unlocks the table.
+After that, without need to call to any action (makes no sense), the "has taken a fork"
+status is printed just to mimic the case that he took the fork that he "can take".
+Then precise_usleep is called with time to die (to mimic hunger time) and dead flag is
+set to true for the monitor to detect it and print the death.
+
+
+4 - CLEANUP ALL DATA
+
+CLEANUP_TABLE (utils.c)
+--------------------------------------------------------
+CLEANUP_TABLE:
+
+void	cleanup_table(t_table *table)
+{
+	int	i;
+
+	i = 0;
+	while (i < table->philo_nbr)
+	{
+		pthread_mutex_destroy(&table->philos[i].philo_mtx);
+		pthread_mutex_destroy(&table->forks[i].fork);
+		i++;
+	}
+	pthread_mutex_destroy(&table->table_mtx);
+	pthread_mutex_destroy(&table->print_mtx);
+	free(table->philos);
+	free(table->forks);
+}
+--------------------------------------------------------
+This function is to be sure no leaks are possible due to allocated memory created
+by us (with philos & forks) or the mutex initialized (each mutex initialized allocates
+memory & this is why its necessary to call the pthread_mutex_destroy function to free).
+
+The function loops through philo_nbr variable in table and destroy each philo_mutx and
+fork mutex, then destroy the table mutex & finally it frees the memory allocated for
+philos & forks arrays.
+
+After cleaning, the program exits with EXIT_SUCCESS code.
+
+With that, all program work is explained.
